@@ -13,14 +13,13 @@ app = FastAPI()
 SONGS_FOLDER = "songs"
 IMGS_FOLDER = "imgs"
 
-# Get env variables (Render will provide them)
+# Environment variables
 AUTH_TOKEN = os.getenv("PCLOUD_AUTH_TOKEN")
 YOUTUBE_COOKIES_BASE64 = os.getenv("YOUTUBE_COOKIES")
 
 def write_temp_cookie_file():
     if not YOUTUBE_COOKIES_BASE64:
         raise Exception("YOUTUBE_COOKIES env var not set")
-
     cookie_bytes = base64.b64decode(YOUTUBE_COOKIES_BASE64)
     temp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="wb")
     temp.write(cookie_bytes)
@@ -81,7 +80,7 @@ def download_thumbnail(thumbnail_url):
         return buffer, filename
     raise Exception("Failed to download thumbnail")
 
-def upload_file_and_get_links(file_buffer, filename, folder_id):
+def upload_file_and_get_fileid(file_buffer, filename, folder_id):
     file_buffer.seek(0)
     upload_res = requests.post("https://api.pcloud.com/uploadfile", params={
         "auth": AUTH_TOKEN,
@@ -93,23 +92,16 @@ def upload_file_and_get_links(file_buffer, filename, folder_id):
 
     fileid = upload_res["metadata"][0]["fileid"]
 
-    publink_res = requests.get("https://api.pcloud.com/getfilepublink", params={
+    # Make file public
+    public_res = requests.get("https://api.pcloud.com/setfilepublink", params={
         "auth": AUTH_TOKEN,
         "fileid": fileid
     }).json()
-    if publink_res.get("result") != 0:
-        raise Exception(f"getfilepublink failed: {publink_res}")
-    public_page = publink_res["link"]
 
-    direct_res = requests.get("https://api.pcloud.com/getfilelink", params={
-        "auth": AUTH_TOKEN,
-        "fileid": fileid
-    }).json()
-    if direct_res.get("result") != 0:
-        raise Exception(f"getfilelink failed: {direct_res}")
-    direct_link = direct_res["hosts"][0] + direct_res["path"]
+    if public_res.get("result") != 0:
+        raise Exception(f"Failed to make file public: {public_res}")
 
-    return public_page, direct_link
+    return fileid
 
 @app.get("/")
 def home():
@@ -125,22 +117,16 @@ def upload(link: str = Query(..., description="YouTube video URL")):
         audio_buffer, audio_filename, thumb_url = download_audio_and_thumbnail(link, cookie_path)
         thumb_buffer, thumb_filename = download_thumbnail(thumb_url)
 
-        mp3_page, mp3_stream = upload_file_and_get_links(audio_buffer, audio_filename, songs_folder_id)
-        jpg_page, jpg_stream = upload_file_and_get_links(thumb_buffer, thumb_filename, imgs_folder_id)
+        mp3_fileid = upload_file_and_get_fileid(audio_buffer, audio_filename, songs_folder_id)
+        jpg_fileid = upload_file_and_get_fileid(thumb_buffer, thumb_filename, imgs_folder_id)
 
         audio_buffer.close()
         thumb_buffer.close()
         os.remove(cookie_path)
 
         return JSONResponse(content={
-            "mp3": {
-                "public_page": mp3_page,
-                "direct_stream": mp3_stream
-            },
-            "thumbnail": {
-                "public_page": jpg_page,
-                "direct_link": jpg_stream
-            }
+            "mp3_fileid": mp3_fileid,
+            "thumbnail_fileid": jpg_fileid
         })
 
     except Exception as e:
