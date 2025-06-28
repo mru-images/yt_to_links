@@ -7,14 +7,16 @@ import requests
 from io import BytesIO
 import tempfile
 import base64
+import traceback
 
 app = FastAPI()
 
-# Configuration
-SONGS_FOLDER = "songs"
-IMGS_FOLDER = "imgs"
+# 🔐 Use Render env vars
 AUTH_TOKEN = os.getenv("PCLOUD_AUTH_TOKEN")
 YOUTUBE_COOKIES_BASE64 = os.getenv("YOUTUBE_COOKIES")
+
+SONGS_FOLDER = "songs"
+IMGS_FOLDER = "imgs"
 
 def write_temp_cookie_file():
     if not YOUTUBE_COOKIES_BASE64:
@@ -30,10 +32,7 @@ def get_or_create_folder(folder_name):
         "auth": AUTH_TOKEN,
         "folderid": 0
     })
-    if not res.content:
-        raise Exception("Empty response from listfolder")
     data = res.json()
-
     for item in data.get("metadata", {}).get("contents", []):
         if item.get("isfolder") and item.get("name") == folder_name:
             return item["folderid"]
@@ -43,8 +42,6 @@ def get_or_create_folder(folder_name):
         "name": folder_name,
         "folderid": 0
     })
-    if not res.content:
-        raise Exception("Empty response from createfolder")
     data = res.json()
     return data["metadata"]["folderid"]
 
@@ -56,24 +53,26 @@ def upload_file(file_buffer, filename, folder_id):
     }, files={
         "file": (filename, file_buffer)
     })
-    if not res.content:
-        raise Exception("Empty response from uploadfile")
-    data = res.json()
 
+    if res.status_code != 200:
+        raise Exception("Upload failed: HTTP " + str(res.status_code))
+
+    data = res.json()
     if data.get("result") != 0:
         raise Exception(f"Upload failed: {data}")
-    
+
     metadata = data["metadata"][0]
     fileid = metadata["fileid"]
     name = metadata["name"]
 
-    # Make file public
-    pub = requests.get("https://api.pcloud.com/setfilepublink", params={
+    # Safely make it public
+    pub = requests.get("https://api.pcloud.com/getfilepublink", params={
         "auth": AUTH_TOKEN,
         "fileid": fileid
     })
-    if not pub.content or pub.status_code != 200:
-        raise Exception("Failed to make file public")
+    pub_data = pub.json()
+    if pub_data.get("result") != 0:
+        raise Exception(f"Failed to make file public: {pub_data}")
 
     return fileid, name
 
@@ -117,7 +116,7 @@ def download_thumbnail(thumbnail_url):
 
 @app.get("/")
 def home():
-    return {"message": "YouTube to pCloud uploader is ready!"}
+    return {"message": "FastAPI YouTube to pCloud uploader is live on Render!"}
 
 @app.get("/upload")
 def upload(link: str = Query(..., description="YouTube video URL")):
@@ -151,6 +150,5 @@ def upload(link: str = Query(..., description="YouTube video URL")):
         })
 
     except Exception as e:
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
