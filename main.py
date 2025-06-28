@@ -7,156 +7,146 @@ import requests
 from io import BytesIO
 import base64
 import tempfile
-import re
-import json
 
 app = FastAPI()
 
-# Folder names in pCloud
 SONGS_FOLDER = "songs"
 IMGS_FOLDER = "imgs"
-
-# Read env vars (set manually or through .env in local)
-PCLOUD_AUTH_TOKEN = os.getenv("PCLOUD_AUTH_TOKEN")
+AUTH_TOKEN = os.getenv("PCLOUD_AUTH_TOKEN")
 YOUTUBE_COOKIES_BASE64 = os.getenv("YOUTUBE_COOKIES")
-
-
-# ------------------ Helper Functions ------------------
-
-def sanitize_filename(name):
-    return re.sub(r'[\\/*?:"<>|]', "", name).strip()
-
 
 def get_or_create_folder(auth_token, folder_name):
     res = requests.get("https://api.pcloud.com/listfolder", params={
-        "auth": auth_token, "folderid": 0
+        "auth": auth_token,
+        "folderid": 0,
+        "recursive": 1
     }).json()
     for item in res.get("metadata", {}).get("contents", []):
         if item.get("isfolder") and item.get("name") == folder_name:
             return item["folderid"]
     res = requests.get("https://api.pcloud.com/createfolder", params={
-        "auth": auth_token, "name": folder_name, "folderid": 0
+        "auth": auth_token,
+        "name": folder_name,
+        "folderid": 0
     }).json()
     return res["metadata"]["folderid"]
 
-
-def download_audio_and_thumbnail(url):
+def download_audio_and_thumbnail(video_url):
     buffer = BytesIO()
     temp_id = str(uuid.uuid4())
+    filename = f"{temp_id}.mp3"
 
-    # Decode base64 YouTube cookies
-    cookies_text = base64.b64decode(YOUTUBE_COOKIES_BASE64).decode()
-    with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix=".txt") as cfile:
-        cfile.write(cookies_text)
-        cookie_path = cfile.name
+    if not YOUTUBE_COOKIES_BASE64:
+        raise Exception("Missing YOUTUBE_COOKIES environment variable")
+
+    with tempfile.NamedTemporaryFile(delete=False, mode='w+', suffix=".txt") as cookie_file:
+        cookie_text = base64.b64decode(YOUTUBE_COOKIES_BASE64).decode()
+        cookie_file.write(cookie_text)
+        cookie_path = cookie_file.name
 
     ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": f"{temp_id}.%(ext)s",
-        "cookiefile": cookie_path,
-        "quiet": True,
-        "noplaylist": True,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192"
-        }]
+        'format': 'bestaudio/best',
+        'outtmpl': f"{temp_id}.%(ext)s",
+        'quiet': True,
+        'cookiefile': cookie_path,
+        'noplaylist': True,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        title = sanitize_filename(info.get("title") or temp_id)
-        thumb_url = info.get("thumbnail")
-        mp3_path = f"{temp_id}.mp3"
-        mp3_name = f"{title}.mp3"
+        info = ydl.extract_info(video_url, download=True)
+        full_path = f"{temp_id}.mp3"
+        thumbnail_url = info.get("thumbnail")
 
-    with open(mp3_path, 'rb') as f:
+    with open(full_path, 'rb') as f:
         buffer.write(f.read())
         buffer.seek(0)
 
-    os.remove(mp3_path)
+    os.remove(full_path)
     os.remove(cookie_path)
-    return buffer, mp3_name, thumb_url
+    return buffer, filename, thumbnail_url
 
+def download_thumbnail(thumbnail_url):
+    res = requests.get(thumbnail_url)
+    if res.status_code == 200:
+        buffer = BytesIO(res.content)
+        filename = f"{uuid.uuid4()}.jpg"
+        return buffer, filename
+    raise Exception("Failed to download thumbnail")
 
-def download_thumbnail(url):
-    res = requests.get(url)
-    if res.ok:
-        return BytesIO(res.content), f"{uuid.uuid4()}.jpg"
-    raise Exception("Thumbnail download failed")
-
-
-def upload_to_pcloud(auth_token, folder_id, file_buffer, filename):
+def upload_and_get_links(auth_token, file_buffer, filename, folder_id):
     file_buffer.seek(0)
-    res = requests.post("https://api.pcloud.com/uploadfile", params={
-        "auth": auth_token, "folderid": folder_id
+    upload_res = requests.post("https://api.pcloud.com/uploadfile", params={
+        "auth": auth_token,
+        "folderid": folder_id
     }, files={"file": (filename, file_buffer)}).json()
-    if res["result"] != 0:
-        raise Exception(f"Upload failed: {res}")
-    fileid = res["metadata"][0]["fileid"]
-    return fileid
 
+    if upload_res.get("result") != 0:
+        raise Exception(f"Upload failed: {upload_res}")
 
-def get_direct_public_link(auth_token, fileid):
+    fileid = upload_res["metadata"][0]["fileid"]
+
+    # Get public page link
     publink_res = requests.get("https://api.pcloud.com/getfilepublink", params={
-        "auth": auth_token, "fileid": fileid
+        "auth": auth_token,
+        "fileid": fileid
     }).json()
-    if publink_res["result"] != 0:
-        raise Exception(f"getfilepublink failed: {publink_res}")
 
-    code = publink_res.get("code")
-    if not code:
-        raise Exception(f"getfilepublink returned no code: {publink_res}")
+    if publink_res.get("result") != 0:
+        raise Exception(f"Public link failed: {publink_res}")
 
-    showlink_res = requests.get("https://api.pcloud.com/showpublink", params={
-        "code": code
+    public_page_link = publink_res.get("link")
+
+    # Get direct stream/download link
+    direct_res = requests.get("https://api.pcloud.com/getfilelink", params={
+        "auth": auth_token,
+        "fileid": fileid
     }).json()
-    if showlink_res["result"] != 0:
-        raise Exception(f"showpublink failed: {showlink_res}")
 
-    metadata = showlink_res["metadata"]
-    if metadata.get("isfolder") is False and "path" in metadata:
-        file_path = metadata["path"]
-    elif "contents" in metadata and len(metadata["contents"]) > 0:
-        file_path = metadata["contents"][0]["path"]
-    else:
-        raise Exception("Could not extract file path from showpublink")
+    if direct_res.get("result") != 0:
+        raise Exception(f"Direct link failed: {direct_res}")
 
-    return showlink_res["hosts"][0] + file_path
+    direct_link = direct_res["hosts"][0] + direct_res["path"]
 
-
-# ------------------ FastAPI Routes ------------------
+    return public_page_link, direct_link
 
 @app.get("/")
-def root():
-    return {"message": "✅ YouTube → pCloud uploader is live!"}
-
+def home():
+    return {"message": "YouTube to pCloud uploader is live!"}
 
 @app.get("/upload")
 def upload(link: str = Query(..., description="YouTube video URL")):
     try:
-        if not PCLOUD_AUTH_TOKEN:
+        if not AUTH_TOKEN:
             raise Exception("Missing PCLOUD_AUTH_TOKEN")
-        if not YOUTUBE_COOKIES_BASE64:
-            raise Exception("Missing YOUTUBE_COOKIES")
 
-        song_fid = get_or_create_folder(PCLOUD_AUTH_TOKEN, SONGS_FOLDER)
-        img_fid = get_or_create_folder(PCLOUD_AUTH_TOKEN, IMGS_FOLDER)
+        songs_folder_id = get_or_create_folder(AUTH_TOKEN, SONGS_FOLDER)
+        imgs_folder_id = get_or_create_folder(AUTH_TOKEN, IMGS_FOLDER)
 
-        audio_buffer, mp3_name, thumb_url = download_audio_and_thumbnail(link)
-        audio_fid = upload_to_pcloud(PCLOUD_AUTH_TOKEN, song_fid, audio_buffer, mp3_name)
+        # Download MP3 and Thumbnail
+        audio_buffer, audio_filename, thumb_url = download_audio_and_thumbnail(link)
+        thumb_buffer, thumb_filename = download_thumbnail(thumb_url)
+
+        # Upload both and get links
+        mp3_public, mp3_direct = upload_and_get_links(AUTH_TOKEN, audio_buffer, audio_filename, songs_folder_id)
+        jpg_public, jpg_direct = upload_and_get_links(AUTH_TOKEN, thumb_buffer, thumb_filename, imgs_folder_id)
+
         audio_buffer.close()
-        mp3_url = get_direct_public_link(PCLOUD_AUTH_TOKEN, audio_fid)
-
-        thumb_buffer, thumb_name = download_thumbnail(thumb_url)
-        thumb_fid = upload_to_pcloud(PCLOUD_AUTH_TOKEN, img_fid, thumb_buffer, thumb_name)
         thumb_buffer.close()
-        thumb_url = get_direct_public_link(PCLOUD_AUTH_TOKEN, thumb_fid)
 
-        return JSONResponse({
-            "mp3_url": mp3_url,
-            "thumbnail_url": thumb_url,
-            "file_name": mp3_name
+        return JSONResponse(content={
+            "mp3": {
+                "public_page": mp3_public,
+                "direct_stream": mp3_direct
+            },
+            "thumbnail": {
+                "public_page": jpg_public,
+                "direct_link": jpg_direct
+            }
         })
 
     except Exception as e:
