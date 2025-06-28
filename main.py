@@ -9,20 +9,17 @@ import base64
 import tempfile
 import time
 import traceback
+import json
 
 app = FastAPI()
 
+# Constants
 SONGS_FOLDER = "songs"
 IMGS_FOLDER = "imgs"
 
-PCLOUD_AUTH_TOKEN = os.getenv("PCLOUD_AUTH_TOKEN")
-YOUTUBE_COOKIES_BASE64 = os.getenv("YOUTUBE_COOKIES")
-
-# Get auth token
-def get_auth_token():
-    if not PCLOUD_AUTH_TOKEN:
-        raise Exception("Missing PCLOUD_AUTH_TOKEN environment variable")
-    return PCLOUD_AUTH_TOKEN
+# Load from env (or hardcode during local testing)
+PCLOUD_AUTH_TOKEN = os.getenv("PCLOUD_AUTH_TOKEN") or "your_pcloud_auth_token_here"
+YOUTUBE_COOKIES_BASE64 = os.getenv("YOUTUBE_COOKIES") or "base64_encoded_youtubecookies_txt"
 
 # Get or create folder in pCloud
 def get_or_create_folder(auth_token, folder_name):
@@ -43,14 +40,11 @@ def get_or_create_folder(auth_token, folder_name):
     }).json()
     return create['metadata']['folderid']
 
-# Download audio and thumbnail
+# Download audio and thumbnail from YouTube
 def download_audio_and_thumbnail(video_url: str):
     buffer = BytesIO()
     temp_id = str(uuid.uuid4())
     filename = f"{temp_id}.mp3"
-
-    if not YOUTUBE_COOKIES_BASE64:
-        raise Exception("Missing YOUTUBE_COOKIES environment variable")
 
     with tempfile.NamedTemporaryFile(delete=False, mode='w+', suffix=".txt") as cookie_file:
         cookie_text = base64.b64decode(YOUTUBE_COOKIES_BASE64).decode()
@@ -83,7 +77,7 @@ def download_audio_and_thumbnail(video_url: str):
     os.remove(cookie_path)
     return buffer, filename, thumbnail_url
 
-# Download thumbnail image
+# Download thumbnail image from URL
 def download_thumbnail(thumbnail_url):
     res = requests.get(thumbnail_url)
     if res.status_code == 200:
@@ -92,13 +86,10 @@ def download_thumbnail(thumbnail_url):
         return buffer, filename
     raise Exception("Failed to download thumbnail")
 
-# Upload and retry getting public link
+# Upload and get public link (handles 1030 error)
 def upload_to_pcloud_and_get_public_link(auth_token, folder_id, file_buffer, filename):
-    import json
-
     file_buffer.seek(0)
 
-    # Step 1: Upload the file
     upload_res = requests.post(
         'https://api.pcloud.com/uploadfile',
         params={'auth': auth_token, 'folderid': folder_id},
@@ -112,9 +103,11 @@ def upload_to_pcloud_and_get_public_link(auth_token, folder_id, file_buffer, fil
 
     fileid = upload_res['metadata'][0]['fileid']
 
-    # Step 2: Retry getpublink with detailed error prints
+    # Try to get public link, retry and fallback to listpublinks
     max_retries = 10
     delay = 2
+    last_error = None
+
     for attempt in range(max_retries):
         time.sleep(delay)
         public_res = requests.get(
@@ -122,15 +115,28 @@ def upload_to_pcloud_and_get_public_link(auth_token, folder_id, file_buffer, fil
             params={'auth': auth_token, 'fileid': fileid}
         ).json()
 
-        print(f"[DEBUG] getpublink attempt {attempt+1} response:", json.dumps(public_res, indent=2))
+        print(f"[DEBUG] getpublink attempt {attempt+1}:", json.dumps(public_res, indent=2))
 
         if public_res.get("result") == 0 and "metadata" in public_res and "link" in public_res["metadata"]:
             return public_res["metadata"]["link"]
 
-        delay += 1.5  # progressive backoff
+        # If file already has public link
+        if public_res.get("result") == 1030:
+            list_links = requests.get("https://api.pcloud.com/listpublinks", params={
+                'auth': auth_token
+            }).json()
 
-    # If it fails after all retries, show last known error reason
-    raise Exception(f"❌ Failed to create public link after {max_retries} retries.\nLast error: {json.dumps(public_res, indent=2)}")
+            print("[DEBUG] listpublinks:", json.dumps(list_links, indent=2))
+
+            if list_links.get("result") == 0:
+                for item in list_links.get("links", []):
+                    if item.get("fileid") == fileid:
+                        return item["link"]
+
+        delay += 1.5
+        last_error = public_res
+
+    raise Exception(f"❌ Failed to create public link after {max_retries} retries.\nLast error: {json.dumps(last_error, indent=2)}")
 
 @app.get("/")
 def home():
@@ -139,7 +145,7 @@ def home():
 @app.get("/upload")
 def upload(link: str = Query(..., description="YouTube video URL")):
     try:
-        auth_token = get_auth_token()
+        auth_token = PCLOUD_AUTH_TOKEN
         songs_folder_id = get_or_create_folder(auth_token, SONGS_FOLDER)
         imgs_folder_id = get_or_create_folder(auth_token, IMGS_FOLDER)
 
