@@ -15,6 +15,7 @@ IMGS_FOLDER = "imgs"
 AUTH_TOKEN = os.getenv("PCLOUD_AUTH_TOKEN")
 YOUTUBE_COOKIES_BASE64 = os.getenv("YOUTUBE_COOKIES")
 
+
 def get_or_create_folder(auth_token, folder_name):
     res = requests.get("https://api.pcloud.com/listfolder", params={
         "auth": auth_token,
@@ -30,6 +31,7 @@ def get_or_create_folder(auth_token, folder_name):
         "folderid": 0
     }).json()
     return res["metadata"]["folderid"]
+
 
 def download_audio_and_thumbnail(video_url):
     buffer = BytesIO()
@@ -70,6 +72,7 @@ def download_audio_and_thumbnail(video_url):
     os.remove(cookie_path)
     return buffer, filename, thumbnail_url
 
+
 def download_thumbnail(thumbnail_url):
     res = requests.get(thumbnail_url)
     if res.status_code == 200:
@@ -78,10 +81,12 @@ def download_thumbnail(thumbnail_url):
         return buffer, filename
     raise Exception("Failed to download thumbnail")
 
-def upload_and_get_links(auth_token, file_buffer, filename, folder_id):
+
+# ✅ Replaced function
+def upload_file_and_get_links(file_buffer, filename, folder_id):
     file_buffer.seek(0)
     upload_res = requests.post("https://api.pcloud.com/uploadfile", params={
-        "auth": auth_token,
+        "auth": AUTH_TOKEN,
         "folderid": folder_id
     }, files={"file": (filename, file_buffer)}).json()
 
@@ -90,33 +95,31 @@ def upload_and_get_links(auth_token, file_buffer, filename, folder_id):
 
     fileid = upload_res["metadata"][0]["fileid"]
 
-    # Get public page link
+    # Public page link
     publink_res = requests.get("https://api.pcloud.com/getfilepublink", params={
-        "auth": auth_token,
+        "auth": AUTH_TOKEN,
         "fileid": fileid
     }).json()
-
     if publink_res.get("result") != 0:
-        raise Exception(f"Public link failed: {publink_res}")
+        raise Exception(f"getfilepublink failed: {publink_res}")
+    public_page = publink_res["link"]
 
-    public_page_link = publink_res.get("link")
-
-    # Get direct stream/download link
+    # Direct streaming link
     direct_res = requests.get("https://api.pcloud.com/getfilelink", params={
-        "auth": auth_token,
+        "auth": AUTH_TOKEN,
         "fileid": fileid
     }).json()
-
     if direct_res.get("result") != 0:
-        raise Exception(f"Direct link failed: {direct_res}")
-
+        raise Exception(f"getfilelink failed: {direct_res}")
     direct_link = direct_res["hosts"][0] + direct_res["path"]
 
-    return public_page_link, direct_link
+    return public_page, direct_link
+
 
 @app.get("/")
 def home():
-    return {"message": "YouTube to pCloud uploader is live!"}
+    return {"message": "YouTube to pCloud uploader is running!"}
+
 
 @app.get("/upload")
 def upload(link: str = Query(..., description="YouTube video URL")):
@@ -127,26 +130,22 @@ def upload(link: str = Query(..., description="YouTube video URL")):
         songs_folder_id = get_or_create_folder(AUTH_TOKEN, SONGS_FOLDER)
         imgs_folder_id = get_or_create_folder(AUTH_TOKEN, IMGS_FOLDER)
 
-        # Download MP3 and Thumbnail
+        # Download
         audio_buffer, audio_filename, thumb_url = download_audio_and_thumbnail(link)
         thumb_buffer, thumb_filename = download_thumbnail(thumb_url)
 
-        # Upload both and get links
-        mp3_public, mp3_direct = upload_and_get_links(AUTH_TOKEN, audio_buffer, audio_filename, songs_folder_id)
-        jpg_public, jpg_direct = upload_and_get_links(AUTH_TOKEN, thumb_buffer, thumb_filename, imgs_folder_id)
+        # Upload both audio and thumbnail
+        mp3_public, mp3_direct = upload_file_and_get_links(audio_buffer, audio_filename, songs_folder_id)
+        thumb_public, thumb_direct = upload_file_and_get_links(thumb_buffer, thumb_filename, imgs_folder_id)
 
         audio_buffer.close()
         thumb_buffer.close()
 
         return JSONResponse(content={
-            "mp3": {
-                "public_page": mp3_public,
-                "direct_stream": mp3_direct
-            },
-            "thumbnail": {
-                "public_page": jpg_public,
-                "direct_link": jpg_direct
-            }
+            "mp3_public_page": mp3_public,
+            "mp3_direct_link": mp3_direct,
+            "thumbnail_public_page": thumb_public,
+            "thumbnail_direct_link": thumb_direct
         })
 
     except Exception as e:
