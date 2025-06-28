@@ -94,32 +94,43 @@ def download_thumbnail(thumbnail_url):
 
 # Upload and retry getting public link
 def upload_to_pcloud_and_get_public_link(auth_token, folder_id, file_buffer, filename):
+    import json
+
     file_buffer.seek(0)
-    upload_res = requests.post('https://api.pcloud.com/uploadfile', params={
-        'auth': auth_token,
-        'folderid': folder_id
-    }, files={'file': (filename, file_buffer)}).json()
+
+    # Step 1: Upload the file
+    upload_res = requests.post(
+        'https://api.pcloud.com/uploadfile',
+        params={'auth': auth_token, 'folderid': folder_id},
+        files={'file': (filename, file_buffer)}
+    ).json()
+
+    print("[DEBUG] uploadfile response:", json.dumps(upload_res, indent=2))
 
     if 'metadata' not in upload_res or not upload_res['metadata']:
-        raise Exception("Upload to pCloud failed: " + str(upload_res))
+        raise Exception("❌ Upload failed: " + str(upload_res))
 
     fileid = upload_res['metadata'][0]['fileid']
 
-    # Retry public link generation
-    for attempt in range(5):
-        public_res = requests.get('https://api.pcloud.com/getpublink', params={
-            'auth': auth_token,
-            'fileid': fileid
-        }).json()
+    # Step 2: Retry getpublink with detailed error prints
+    max_retries = 10
+    delay = 2
+    for attempt in range(max_retries):
+        time.sleep(delay)
+        public_res = requests.get(
+            'https://api.pcloud.com/getpublink',
+            params={'auth': auth_token, 'fileid': fileid}
+        ).json()
 
-        print(f"[DEBUG] Attempt {attempt+1} getpublink:", public_res)
+        print(f"[DEBUG] getpublink attempt {attempt+1} response:", json.dumps(public_res, indent=2))
 
-        if public_res.get('result') == 0 and 'metadata' in public_res and 'link' in public_res['metadata']:
-            return public_res['metadata']['link']
+        if public_res.get("result") == 0 and "metadata" in public_res and "link" in public_res["metadata"]:
+            return public_res["metadata"]["link"]
 
-        time.sleep(2)  # wait before retry
+        delay += 1.5  # progressive backoff
 
-    raise Exception("❌ Failed to create public link after 5 retries")
+    # If it fails after all retries, show last known error reason
+    raise Exception(f"❌ Failed to create public link after {max_retries} retries.\nLast error: {json.dumps(public_res, indent=2)}")
 
 @app.get("/")
 def home():
