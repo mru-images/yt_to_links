@@ -7,6 +7,8 @@ import requests
 from io import BytesIO
 import base64
 import tempfile
+import time
+import traceback
 
 app = FastAPI()
 
@@ -22,16 +24,18 @@ def get_auth_token():
         raise Exception("Missing PCLOUD_AUTH_TOKEN environment variable")
     return PCLOUD_AUTH_TOKEN
 
-# Create or fetch folder ID by name
+# Get or create folder in pCloud
 def get_or_create_folder(auth_token, folder_name):
     res = requests.get('https://api.pcloud.com/listfolder', params={
         'auth': auth_token,
         'folderid': 0,
         'recursive': 1
     }).json()
+
     for item in res.get('metadata', {}).get('contents', []):
         if item['isfolder'] and item['name'] == folder_name:
             return item['folderid']
+
     create = requests.get('https://api.pcloud.com/createfolder', params={
         'auth': auth_token,
         'name': folder_name,
@@ -39,7 +43,7 @@ def get_or_create_folder(auth_token, folder_name):
     }).json()
     return create['metadata']['folderid']
 
-# Download audio & extract thumbnail URL
+# Download audio and thumbnail
 def download_audio_and_thumbnail(video_url: str):
     buffer = BytesIO()
     temp_id = str(uuid.uuid4())
@@ -88,7 +92,7 @@ def download_thumbnail(thumbnail_url):
         return buffer, filename
     raise Exception("Failed to download thumbnail")
 
-# Upload to pCloud and get permanent public link
+# Upload and retry getting public link
 def upload_to_pcloud_and_get_public_link(auth_token, folder_id, file_buffer, filename):
     file_buffer.seek(0)
     upload_res = requests.post('https://api.pcloud.com/uploadfile', params={
@@ -96,21 +100,30 @@ def upload_to_pcloud_and_get_public_link(auth_token, folder_id, file_buffer, fil
         'folderid': folder_id
     }, files={'file': (filename, file_buffer)}).json()
 
+    if 'metadata' not in upload_res or not upload_res['metadata']:
+        raise Exception("Upload to pCloud failed: " + str(upload_res))
+
     fileid = upload_res['metadata'][0]['fileid']
 
-    public_res = requests.get('https://api.pcloud.com/getpublink', params={
-        'auth': auth_token,
-        'fileid': fileid
-    }).json()
+    # Retry public link generation
+    for attempt in range(5):
+        public_res = requests.get('https://api.pcloud.com/getpublink', params={
+            'auth': auth_token,
+            'fileid': fileid
+        }).json()
 
-    if 'metadata' in public_res and 'link' in public_res['metadata']:
-        return public_res['metadata']['link']
+        print(f"[DEBUG] Attempt {attempt+1} getpublink:", public_res)
 
-    raise Exception("Failed to create public link")
+        if public_res.get('result') == 0 and 'metadata' in public_res and 'link' in public_res['metadata']:
+            return public_res['metadata']['link']
+
+        time.sleep(2)  # wait before retry
+
+    raise Exception("❌ Failed to create public link after 5 retries")
 
 @app.get("/")
 def home():
-    return {"message": "YouTube to pCloud Uploader is running!"}
+    return {"message": "YouTube to pCloud uploader is working!"}
 
 @app.get("/upload")
 def upload(link: str = Query(..., description="YouTube video URL")):
@@ -119,15 +132,20 @@ def upload(link: str = Query(..., description="YouTube video URL")):
         songs_folder_id = get_or_create_folder(auth_token, SONGS_FOLDER)
         imgs_folder_id = get_or_create_folder(auth_token, IMGS_FOLDER)
 
-        # Download MP3 and get thumbnail URL
+        print("[INFO] Downloading audio and thumbnail...")
         audio_buffer, audio_filename, thumbnail_url = download_audio_and_thumbnail(link)
+
+        print("[INFO] Uploading MP3 to pCloud...")
         mp3_link = upload_to_pcloud_and_get_public_link(auth_token, songs_folder_id, audio_buffer, audio_filename)
         audio_buffer.close()
 
         if not thumbnail_url:
-            raise Exception("No thumbnail found in video.")
+            raise Exception("No thumbnail found in the YouTube video")
 
+        print("[INFO] Downloading thumbnail...")
         thumb_buffer, thumb_filename = download_thumbnail(thumbnail_url)
+
+        print("[INFO] Uploading thumbnail to pCloud...")
         thumb_link = upload_to_pcloud_and_get_public_link(auth_token, imgs_folder_id, thumb_buffer, thumb_filename)
         thumb_buffer.close()
 
@@ -137,4 +155,5 @@ def upload(link: str = Query(..., description="YouTube video URL")):
         })
 
     except Exception as e:
+        print("[ERROR]", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
