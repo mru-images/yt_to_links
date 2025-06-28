@@ -13,23 +13,14 @@ app = FastAPI()
 SONGS_FOLDER = "songs"
 IMGS_FOLDER = "imgs"
 
-# 🔐 Read from environment variables
-PCLOUD_USERNAME = os.getenv("PCLOUD_USERNAME")
-PCLOUD_PASSWORD = os.getenv("PCLOUD_PASSWORD")
+PCLOUD_AUTH_TOKEN = os.getenv("PCLOUD_AUTH_TOKEN")
 YOUTUBE_COOKIES_BASE64 = os.getenv("YOUTUBE_COOKIES")  # base64 encoded cookies
 
-# Authenticate with pCloud
 def get_auth_token():
-    res = requests.get('https://api.pcloud.com/login', params={
-        'getauth': 1,
-        'username': PCLOUD_USERNAME,
-        'password': PCLOUD_PASSWORD
-    }).json()
-    if not res.get('auth'):
-        raise Exception("pCloud auth failed: " + str(res))
-    return res['auth']
+    if not PCLOUD_AUTH_TOKEN:
+        raise Exception("Missing PCLOUD_AUTH_TOKEN environment variable")
+    return PCLOUD_AUTH_TOKEN
 
-# Create or get folder ID
 def get_or_create_folder(auth_token, folder_name):
     res = requests.get('https://api.pcloud.com/listfolder', params={
         'auth': auth_token,
@@ -46,14 +37,13 @@ def get_or_create_folder(auth_token, folder_name):
     }).json()
     return create['metadata']['folderid']
 
-# Download audio and get thumbnail URL
 def download_audio_and_thumbnail(video_url: str):
     buffer = BytesIO()
     temp_id = str(uuid.uuid4())
     filename = f"{temp_id}.mp3"
 
     if not YOUTUBE_COOKIES_BASE64:
-        raise Exception("Missing YOUTUBE_COOKIES env var")
+        raise Exception("Missing YOUTUBE_COOKIES environment variable")
 
     with tempfile.NamedTemporaryFile(delete=False, mode='w+', suffix=".txt") as cookie_file:
         cookie_text = base64.b64decode(YOUTUBE_COOKIES_BASE64).decode()
@@ -86,7 +76,6 @@ def download_audio_and_thumbnail(video_url: str):
     os.remove(cookie_path)
     return buffer, filename, thumbnail_url
 
-# Download thumbnail image
 def download_thumbnail(thumbnail_url):
     res = requests.get(thumbnail_url)
     if res.status_code == 200:
@@ -95,7 +84,6 @@ def download_thumbnail(thumbnail_url):
         return buffer, filename
     raise Exception("Failed to download thumbnail")
 
-# Upload to pCloud
 def upload_to_pcloud(auth_token, folder_id, file_buffer, filename):
     file_buffer.seek(0)
     res = requests.post('https://api.pcloud.com/uploadfile', params={
@@ -109,12 +97,10 @@ def upload_to_pcloud(auth_token, folder_id, file_buffer, filename):
     }).json()
     return link_res['hosts'][0] + link_res['path']
 
-# Health check
 @app.get("/")
 def home():
-    return {"message": "YouTube to pCloud Uploader is running on Render!"}
+    return {"message": "YouTube to pCloud is working!"}
 
-# Upload endpoint
 @app.get("/upload")
 def upload(link: str = Query(..., description="YouTube video URL")):
     try:
